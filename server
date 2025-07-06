@@ -1,0 +1,127 @@
+import socket
+import threading
+import json
+
+# 模拟用户 (用户名: 密码)
+USERS = {
+    "user1": "123456",
+    "user2": "654321"
+}
+# 在线用户 (用户名: socket)
+ONLINE = {}
+
+def handle_conn(client_sock):
+    try:
+        # 1. 接收登录请求
+        login_req = client_sock.recv(1024).decode('utf-8')
+        try:
+            data = json.loads(login_req)
+        except:
+            # 非法格式
+            resp = json.dumps({
+                "type": "error",
+                "code": "INVALID_FORMAT",
+                "msg": "请发送 JSON 格式的登录请求"
+            })
+            client_sock.send(resp.encode('utf-8'))
+            client_sock.close()
+            return
+
+        # 2. 校验登录类型
+        if data.get("type") != "login":
+            resp = json.dumps({
+                "type": "error",
+                "code": "INVALID_TYPE",
+                "msg": "请求类型必须为 'login'"
+            })
+            client_sock.send(resp.encode('utf-8'))
+            client_sock.close()
+            return
+
+        # 3. 校验账号密码
+        username = data.get("username")
+        password = data.get("password")
+        if username not in USERS or USERS[username] != password:
+            resp = json.dumps({
+                "type": "login_fail",
+                "msg": "用户名或密码错误"
+            })
+            client_sock.send(resp.encode('utf-8'))
+            client_sock.close()
+            return
+
+        # 4. 登录成功，更新在线状态
+        ONLINE[username] = client_sock
+        resp = json.dumps({
+            "type": "login_success",
+            "msg": "登录成功",
+            "online_users": list(ONLINE.keys())
+        })
+        client_sock.send(resp.encode('utf-8'))
+
+        # 5. 通知所有用户更新在线列表
+        broadcast_online()
+
+        # 6. 处理聊天消息（修复格式问题）
+        while True:
+            msg = client_sock.recv(1024).decode('utf-8')
+            if not msg:
+                break
+                
+            # 解析客户端发送的消息
+            try:
+                client_data = json.loads(msg)
+                if client_data.get("type") == "chat":
+                    content = client_data.get("content", "")
+                    sender = username
+                else:
+                    content = msg
+                    sender = username
+            except json.JSONDecodeError:
+                content = msg
+                sender = username
+
+            # 构造标准聊天消息格式
+            chat_msg = json.dumps({
+                "type": "chat",
+                "sender": sender,
+                "content": content
+            })
+            
+            # 广播给所有在线用户
+            for user_sock in ONLINE.values():
+                user_sock.send(chat_msg.encode('utf-8'))
+
+    except Exception as e:
+        print(f"客户端异常: {e}")
+    finally:
+        # 移除下线用户
+        for user in list(ONLINE.keys()):
+            if ONLINE[user] == client_sock:
+                del ONLINE[user]
+                broadcast_online()
+                break
+        client_sock.close()
+
+def broadcast_online():
+    """广播在线用户列表"""
+    resp = json.dumps({
+        "type": "online_update",
+        "online_users": list(ONLINE.keys())
+    })
+    for user_sock in ONLINE.values():
+        user_sock.send(resp.encode('utf-8'))
+
+def main():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(('localhost', 8889))
+    server.listen(5)
+    print("服务器启动，端口 8889 等待连接...")
+
+    while True:
+        client_sock, addr = server.accept()
+        print(f"新连接: {addr}")
+        threading.Thread(target=handle_conn, args=(client_sock,)).start()
+
+if __name__ == "__main__":
+    main()
